@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vidious Cycle
 // @namespace    xyz.vigier.userscripts.vidious-cycle
-// @version      0.1.0
+// @version      0.1.1
 // @description  Redirect YouTube video URLs to a user-selected online Invidious instance.
 // @author       tuxfre
 // @license      MIT
@@ -19,6 +19,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_addStyle
 // @connect      api.invidious.io
 // ==/UserScript==
 
@@ -41,9 +42,112 @@
     let lastHandledHref = null;
     let currentHandleToken = 0;
 
+    installStyles();
     registerMenuCommands();
     installYouTubeNavigationWatcher();
     scheduleCurrentLocationHandling("initial load");
+
+    function installStyles() {
+        GM_addStyle(`
+      #vidious-cycle-picker {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        padding: 16px;
+        background: rgba(0, 0, 0, 0.72);
+        color: #111;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      #vidious-cycle-picker * {
+        box-sizing: border-box;
+      }
+
+      #vidious-cycle-picker .vidious-cycle-card {
+        width: min(760px, 100%);
+        padding: 24px;
+        border-radius: 16px;
+        background: #fff;
+        box-shadow: 0 22px 72px rgba(0, 0, 0, 0.36);
+      }
+
+      #vidious-cycle-picker h1 {
+        margin: 0 0 8px;
+        color: #111;
+        font-size: 22px;
+        font-weight: 700;
+        line-height: 1.25;
+      }
+
+      #vidious-cycle-picker p {
+        margin: 0 0 16px;
+        color: #333;
+        font-size: 14px;
+        line-height: 1.45;
+      }
+
+      #vidious-cycle-picker select {
+        width: 100%;
+        min-height: 44px;
+        padding: 8px 10px;
+        border: 1px solid #bbb;
+        border-radius: 8px;
+        background: #fff;
+        color: #111;
+        font-size: 14px;
+      }
+
+      #vidious-cycle-picker .vidious-cycle-warning {
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: #fff4d6;
+        color: #4b3500;
+      }
+
+      #vidious-cycle-picker .vidious-cycle-note {
+        margin-top: 10px;
+        color: #555;
+        font-size: 12px;
+      }
+
+      #vidious-cycle-picker .vidious-cycle-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        justify-content: flex-end;
+        margin-top: 18px;
+      }
+
+      #vidious-cycle-picker button {
+        border: 0;
+        border-radius: 9px;
+        padding: 9px 14px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+
+      #vidious-cycle-save-instance {
+        background: #111;
+        color: #fff;
+      }
+
+      #vidious-cycle-refresh-instances,
+      #vidious-cycle-close-picker {
+        background: #eee;
+        color: #111;
+      }
+
+      #vidious-cycle-picker button:disabled,
+      #vidious-cycle-picker select:disabled {
+        cursor: not-allowed;
+        opacity: 0.56;
+      }
+    `);
+    }
 
     function registerMenuCommands() {
         if (typeof GM_registerMenuCommand !== "function") {
@@ -94,10 +198,6 @@
     }
 
     function installYouTubeNavigationWatcher() {
-        /*
-         * YouTube often changes URL without a full page reload.
-         * A userscript that only runs once at page load will miss those changes.
-         */
         const originalPushState = history.pushState;
         const originalReplaceState = history.replaceState;
 
@@ -171,10 +271,6 @@
         } catch (error) {
             warn("Could not refresh the Invidious instance list.", error);
 
-            /*
-             * If the registry fails but the user already has a selected instance,
-             * use it. The registry being down should not break an already chosen route.
-             */
             if (selectedInstance && selectedInstance.uri) {
                 info("Registry unavailable. Falling back to stored instance.", {
                     uri: selectedInstance.uri,
@@ -246,10 +342,6 @@
         const hostname = url.hostname.replace(/^www\./, "");
         let videoId = null;
 
-        /*
-         * Standard watch URL:
-         * https://www.youtube.com/watch?v=dQw4w9WgXcQ
-         */
         if (
             (hostname === "youtube.com" || hostname === "m.youtube.com") &&
             url.pathname === "/watch"
@@ -257,18 +349,10 @@
             videoId = url.searchParams.get("v");
         }
 
-        /*
-         * Short URL:
-         * https://youtu.be/dQw4w9WgXcQ
-         */
         if (hostname === "youtu.be") {
             videoId = url.pathname.slice(1).split("/")[0];
         }
 
-        /*
-         * Shorts URL:
-         * https://www.youtube.com/shorts/dQw4w9WgXcQ
-         */
         if (
             (hostname === "youtube.com" || hostname === "m.youtube.com") &&
             url.pathname.startsWith("/shorts/")
@@ -276,10 +360,6 @@
             videoId = url.pathname.split("/")[2];
         }
 
-        /*
-         * Embed URL:
-         * https://www.youtube.com/embed/dQw4w9WgXcQ
-         */
         if (
             (hostname === "youtube.com" || hostname === "m.youtube.com") &&
             url.pathname.startsWith("/embed/")
@@ -503,93 +583,14 @@
             }
 
             const selected = getStoredObject(CONFIG.selectedInstanceKey, null);
-            const overlay = document.createElement("div");
-
-            overlay.id = "vidious-cycle-picker";
-            overlay.innerHTML = buildPickerHtml(instances, selected, reason);
+            const overlay = buildPickerElement({
+                instances,
+                selected,
+                reason,
+                redirectAfterSave,
+            });
 
             document.body.appendChild(overlay);
-
-            const select = overlay.querySelector("#vidious-cycle-instance-select");
-            const saveButton = overlay.querySelector("#vidious-cycle-save-instance");
-            const refreshButton = overlay.querySelector(
-                "#vidious-cycle-refresh-instances"
-            );
-            const closeButton = overlay.querySelector("#vidious-cycle-close-picker");
-
-            if (!select || !saveButton || !refreshButton || !closeButton) {
-                errorLog("Picker controls could not be found after rendering.", {
-                    select,
-                    saveButton,
-                    refreshButton,
-                    closeButton,
-                });
-                return;
-            }
-
-            saveButton.addEventListener("click", function () {
-                debug("Picker save clicked.", {
-                    selectedValue: select.value,
-                });
-
-                if (!select.value) {
-                    warn("Save clicked without a selected instance.");
-                    return;
-                }
-
-                const instance = instances.find(function (candidate) {
-                    return candidate.uri === select.value;
-                });
-
-                if (!instance) {
-                    warn("Selected instance could not be found in current list.", {
-                        selectedValue: select.value,
-                    });
-                    return;
-                }
-
-                setStoredObject(CONFIG.selectedInstanceKey, instance);
-                info("Selected instance saved.", instance);
-
-                overlay.remove();
-
-                const currentVideo = extractYouTubeVideo(location.href);
-
-                if (redirectAfterSave && currentVideo) {
-                    redirectToInvidious(instance.uri, currentVideo);
-                }
-            });
-
-            refreshButton.addEventListener("click", async function () {
-                debug("Picker refresh clicked.");
-
-                refreshButton.disabled = true;
-                refreshButton.textContent = "Refreshing...";
-
-                try {
-                    const refreshedInstances = await getAvailableInstances({
-                        forceRefresh: true,
-                    });
-
-                    overlay.remove();
-
-                    showInstancePicker({
-                        instances: refreshedInstances,
-                        reason: "Instance list refreshed. Choose your preferred instance.",
-                        redirectAfterSave,
-                    });
-                } catch (error) {
-                    errorLog("Could not refresh instance list from picker.", error);
-
-                    refreshButton.disabled = false;
-                    refreshButton.textContent = "Refresh list";
-                }
-            });
-
-            closeButton.addEventListener("click", function () {
-                debug("Picker closed.");
-                overlay.remove();
-            });
 
             info("Instance picker shown.", {
                 instances: instances.length,
@@ -597,163 +598,159 @@
         });
     }
 
-    function buildPickerHtml(instances, selected, reason) {
-        const options = instances
-            .map(function (instance) {
-                const labelParts = [
-                    escapeHtml(instance.name),
-                    instance.region ? escapeHtml(instance.region) : "unknown region",
-                    instance.uptime.toFixed(1) + "% uptime",
-                ];
+    function buildPickerElement({ instances, selected, reason, redirectAfterSave }) {
+        const overlay = document.createElement("div");
+        overlay.id = "vidious-cycle-picker";
 
-                if (instance.activeMonthUsers > 0) {
-                    labelParts.push(instance.activeMonthUsers + " monthly users");
-                }
+        const card = document.createElement("div");
+        card.className = "vidious-cycle-card";
+        card.setAttribute("role", "dialog");
+        card.setAttribute("aria-modal", "true");
+        card.setAttribute("aria-labelledby", "vidious-cycle-title");
 
-                const isSelected =
-                    selected && selected.uri === instance.uri ? " selected" : "";
+        const title = document.createElement("h1");
+        title.id = "vidious-cycle-title";
+        title.textContent = "Choose Invidious instance";
 
-                return (
-                    '<option value="' +
-                    escapeHtml(instance.uri) +
-                    '"' +
-                    isSelected +
-                    ">" +
-                    labelParts.join(" · ") +
-                    "</option>"
-                );
-            })
-            .join("");
+        const intro = document.createElement("p");
+        intro.textContent = reason;
 
-        const emptyState =
-            instances.length === 0
-                ? '<p class="vidious-cycle-warning">No monitored HTTPS instances are currently reported as online.</p>'
-                : "";
+        card.appendChild(title);
+        card.appendChild(intro);
 
-        return `
-      <style>
-        #vidious-cycle-picker {
-          position: fixed;
-          inset: 0;
-          z-index: 2147483647;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          box-sizing: border-box;
-          padding: 16px;
-          background: rgba(0, 0, 0, 0.72);
-          color: #111;
-          font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        if (instances.length === 0) {
+            const warning = document.createElement("p");
+            warning.className = "vidious-cycle-warning";
+            warning.textContent =
+                "No monitored HTTPS instances are currently reported as online.";
+            card.appendChild(warning);
         }
 
-        #vidious-cycle-picker * {
-          box-sizing: border-box;
-        }
+        const select = document.createElement("select");
+        select.id = "vidious-cycle-instance-select";
+        select.disabled = instances.length === 0;
 
-        #vidious-cycle-picker .vidious-cycle-card {
-          width: min(760px, 100%);
-          padding: 24px;
-          border-radius: 16px;
-          background: #fff;
-          box-shadow: 0 22px 72px rgba(0, 0, 0, 0.36);
-        }
+        instances.forEach(function (instance) {
+            const option = document.createElement("option");
+            option.value = instance.uri;
 
-        #vidious-cycle-picker h1 {
-          margin: 0 0 8px;
-          color: #111;
-          font-size: 22px;
-          font-weight: 700;
-          line-height: 1.25;
-        }
+            const labelParts = [
+                instance.name,
+                instance.region || "unknown region",
+                instance.uptime.toFixed(1) + "% uptime",
+            ];
 
-        #vidious-cycle-picker p {
-          margin: 0 0 16px;
-          color: #333;
-          font-size: 14px;
-          line-height: 1.45;
-        }
+            if (instance.activeMonthUsers > 0) {
+                labelParts.push(instance.activeMonthUsers + " monthly users");
+            }
 
-        #vidious-cycle-picker select {
-          width: 100%;
-          min-height: 44px;
-          padding: 8px 10px;
-          border: 1px solid #bbb;
-          border-radius: 8px;
-          background: #fff;
-          color: #111;
-          font-size: 14px;
-        }
+            option.textContent = labelParts.join(" · ");
 
-        #vidious-cycle-picker .vidious-cycle-warning {
-          padding: 10px 12px;
-          border-radius: 8px;
-          background: #fff4d6;
-          color: #4b3500;
-        }
+            if (selected && selected.uri === instance.uri) {
+                option.selected = true;
+            }
 
-        #vidious-cycle-picker .vidious-cycle-note {
-          margin-top: 10px;
-          color: #555;
-          font-size: 12px;
-        }
+            select.appendChild(option);
+        });
 
-        #vidious-cycle-picker .vidious-cycle-actions {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 10px;
-          justify-content: flex-end;
-          margin-top: 18px;
-        }
+        const note = document.createElement("p");
+        note.className = "vidious-cycle-note";
+        note.textContent =
+            "Only monitored HTTPS instances currently reported as online are shown. Random instance roulette is left as an exercise for people who enjoy chaos.";
 
-        #vidious-cycle-picker button {
-          border: 0;
-          border-radius: 9px;
-          padding: 9px 14px;
-          font-size: 14px;
-          cursor: pointer;
-        }
+        const actions = document.createElement("div");
+        actions.className = "vidious-cycle-actions";
 
-        #vidious-cycle-save-instance {
-          background: #111;
-          color: #fff;
-        }
+        const refreshButton = document.createElement("button");
+        refreshButton.id = "vidious-cycle-refresh-instances";
+        refreshButton.type = "button";
+        refreshButton.textContent = "Refresh list";
 
-        #vidious-cycle-refresh-instances,
-        #vidious-cycle-close-picker {
-          background: #eee;
-          color: #111;
-        }
+        const closeButton = document.createElement("button");
+        closeButton.id = "vidious-cycle-close-picker";
+        closeButton.type = "button";
+        closeButton.textContent = "Close";
 
-        #vidious-cycle-picker button:disabled,
-        #vidious-cycle-picker select:disabled {
-          cursor: not-allowed;
-          opacity: 0.56;
-        }
-      </style>
+        const saveButton = document.createElement("button");
+        saveButton.id = "vidious-cycle-save-instance";
+        saveButton.type = "button";
+        saveButton.textContent = "Save and continue";
+        saveButton.disabled = instances.length === 0;
 
-      <div class="vidious-cycle-card" role="dialog" aria-modal="true" aria-labelledby="vidious-cycle-title">
-        <h1 id="vidious-cycle-title">Choose Invidious instance</h1>
-        <p>${escapeHtml(reason)}</p>
+        saveButton.addEventListener("click", function () {
+            debug("Picker save clicked.", {
+                selectedValue: select.value,
+            });
 
-        ${emptyState}
+            if (!select.value) {
+                warn("Save clicked without a selected instance.");
+                return;
+            }
 
-        <select id="vidious-cycle-instance-select" ${instances.length === 0 ? "disabled" : ""}>
-          ${options}
-        </select>
+            const instance = instances.find(function (candidate) {
+                return candidate.uri === select.value;
+            });
 
-        <p class="vidious-cycle-note">
-          Only monitored HTTPS instances currently reported as online are shown. Random instance roulette is left as an exercise for people who enjoy chaos.
-        </p>
+            if (!instance) {
+                warn("Selected instance could not be found in current list.", {
+                    selectedValue: select.value,
+                });
+                return;
+            }
 
-        <div class="vidious-cycle-actions">
-          <button id="vidious-cycle-refresh-instances" type="button">Refresh list</button>
-          <button id="vidious-cycle-close-picker" type="button">Close</button>
-          <button id="vidious-cycle-save-instance" type="button" ${instances.length === 0 ? "disabled" : ""}>
-            Save and continue
-          </button>
-        </div>
-      </div>
-    `;
+            setStoredObject(CONFIG.selectedInstanceKey, instance);
+            info("Selected instance saved.", instance);
+
+            overlay.remove();
+
+            const currentVideo = extractYouTubeVideo(location.href);
+
+            if (redirectAfterSave && currentVideo) {
+                redirectToInvidious(instance.uri, currentVideo);
+            }
+        });
+
+        refreshButton.addEventListener("click", async function () {
+            debug("Picker refresh clicked.");
+
+            refreshButton.disabled = true;
+            refreshButton.textContent = "Refreshing...";
+
+            try {
+                const refreshedInstances = await getAvailableInstances({
+                    forceRefresh: true,
+                });
+
+                overlay.remove();
+
+                showInstancePicker({
+                    instances: refreshedInstances,
+                    reason: "Instance list refreshed. Choose your preferred instance.",
+                    redirectAfterSave,
+                });
+            } catch (error) {
+                errorLog("Could not refresh instance list from picker.", error);
+
+                refreshButton.disabled = false;
+                refreshButton.textContent = "Refresh list";
+            }
+        });
+
+        closeButton.addEventListener("click", function () {
+            debug("Picker closed.");
+            overlay.remove();
+        });
+
+        actions.appendChild(refreshButton);
+        actions.appendChild(closeButton);
+        actions.appendChild(saveButton);
+
+        card.appendChild(select);
+        card.appendChild(note);
+        card.appendChild(actions);
+        overlay.appendChild(card);
+
+        return overlay;
     }
 
     function runWhenBodyExists(callback) {
@@ -787,15 +784,6 @@
 
     function trimTrailingSlash(value) {
         return String(value || "").replace(/\/+$/, "");
-    }
-
-    function escapeHtml(value) {
-        return String(value)
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#039;");
     }
 
     function getStoredObject(key, fallback) {
