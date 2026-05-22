@@ -26,6 +26,8 @@
     "use strict";
 
     const CONFIG = {
+        debug: true,
+
         instanceApiUrl:
             "https://api.invidious.io/instances.json?pretty=1&sort_by=type,users",
 
@@ -36,47 +38,173 @@
         minimumUptimePercent: 90,
     };
 
-    const currentVideo = extractYouTubeVideo(location.href);
+    let lastHandledHref = null;
+    let currentHandleToken = 0;
 
     registerMenuCommands();
+    installYouTubeNavigationWatcher();
+    scheduleCurrentLocationHandling("initial load");
 
-    if (!currentVideo) {
-        return;
+    function registerMenuCommands() {
+        if (typeof GM_registerMenuCommand !== "function") {
+            warn("GM_registerMenuCommand is not available.");
+            return;
+        }
+
+        GM_registerMenuCommand("Choose Invidious instance", async function () {
+            info("Menu command: choose instance.");
+
+            try {
+                const instances = await getAvailableInstances({ forceRefresh: true });
+
+                showInstancePicker({
+                    instances,
+                    reason: "Choose your preferred Invidious instance.",
+                    redirectAfterSave: Boolean(extractYouTubeVideo(location.href)),
+                });
+            } catch (error) {
+                errorLog("Could not load instance list from menu command.", error);
+
+                showInstancePicker({
+                    instances: [],
+                    reason:
+                        "The Invidious instance list could not be loaded. Check the console, then try refreshing the list.",
+                    redirectAfterSave: Boolean(extractYouTubeVideo(location.href)),
+                });
+            }
+        });
+
+        GM_registerMenuCommand("Refresh Invidious instance list", async function () {
+            info("Menu command: refresh instance list.");
+
+            try {
+                const instances = await getAvailableInstances({ forceRefresh: true });
+                info("Instance list refreshed.", {
+                    availableInstances: instances.length,
+                });
+            } catch (error) {
+                errorLog("Could not refresh instance list.", error);
+            }
+        });
+
+        GM_registerMenuCommand("Forget selected instance", function () {
+            removeStoredValue(CONFIG.selectedInstanceKey);
+            info("Selected instance forgotten.");
+        });
     }
 
-    main().catch(function (error) {
-        console.error("Vidious Cycle failed:", error);
-    });
+    function installYouTubeNavigationWatcher() {
+        /*
+         * YouTube often changes URL without a full page reload.
+         * A userscript that only runs once at page load will miss those changes.
+         */
+        const originalPushState = history.pushState;
+        const originalReplaceState = history.replaceState;
 
-    async function main() {
+        history.pushState = function () {
+            const result = originalPushState.apply(this, arguments);
+            window.dispatchEvent(new Event("vidious-cycle-location-change"));
+            return result;
+        };
+
+        history.replaceState = function () {
+            const result = originalReplaceState.apply(this, arguments);
+            window.dispatchEvent(new Event("vidious-cycle-location-change"));
+            return result;
+        };
+
+        window.addEventListener("popstate", function () {
+            scheduleCurrentLocationHandling("popstate");
+        });
+
+        window.addEventListener("vidious-cycle-location-change", function () {
+            scheduleCurrentLocationHandling("history change");
+        });
+
+        window.addEventListener("yt-navigate-finish", function () {
+            scheduleCurrentLocationHandling("youtube navigation");
+        });
+
+        debug("Navigation watcher installed.");
+    }
+
+    function scheduleCurrentLocationHandling(reason) {
+        window.setTimeout(function () {
+            handleCurrentLocation(reason).catch(function (error) {
+                errorLog("Unhandled error while processing current location.", error);
+            });
+        }, 0);
+    }
+
+    async function handleCurrentLocation(reason) {
+        const href = location.href;
+
+        if (href === lastHandledHref) {
+            debug("Skipping already handled URL.", { href, reason });
+            return;
+        }
+
+        lastHandledHref = href;
+
+        const token = ++currentHandleToken;
+        const video = extractYouTubeVideo(href);
+
+        debug("Handling current URL.", {
+            reason,
+            href,
+            video,
+        });
+
+        if (!video) {
+            debug("No supported YouTube video URL detected.");
+            return;
+        }
+
         const selectedInstance = getStoredObject(CONFIG.selectedInstanceKey, null);
+
+        debug("Stored selected instance.", selectedInstance);
 
         let availableInstances = [];
 
         try {
             availableInstances = await getAvailableInstances({ forceRefresh: false });
         } catch (error) {
-            console.warn("Vidious Cycle could not refresh the instance list:", error);
+            warn("Could not refresh the Invidious instance list.", error);
 
             /*
              * If the registry fails but the user already has a selected instance,
-             * use it. The registry being down should not make the redirect useless.
+             * use it. The registry being down should not break an already chosen route.
              */
             if (selectedInstance && selectedInstance.uri) {
-                redirectToInvidious(selectedInstance.uri, currentVideo);
+                info("Registry unavailable. Falling back to stored instance.", {
+                    uri: selectedInstance.uri,
+                });
+
+                redirectToInvidious(selectedInstance.uri, video);
                 return;
             }
 
             showInstancePicker({
                 instances: [],
                 reason:
-                    "The Invidious instance list could not be loaded. Refresh the list or try again later.",
+                    "The Invidious instance list could not be loaded. Check the console, then try refreshing the list.",
                 redirectAfterSave: true,
             });
             return;
         }
 
+        if (token !== currentHandleToken) {
+            debug("Skipping stale handling token.");
+            return;
+        }
+
+        debug("Available instances after filtering.", {
+            count: availableInstances.length,
+        });
+
         if (!selectedInstance || !selectedInstance.uri) {
+            info("No selected instance found. Opening picker.");
+
             showInstancePicker({
                 instances: availableInstances,
                 reason: "No Invidious instance has been selected yet.",
@@ -90,6 +218,10 @@
         });
 
         if (!selectedStillOnline) {
+            info("Stored instance is not currently reported online. Opening picker.", {
+                selectedInstance,
+            });
+
             showInstancePicker({
                 instances: availableInstances,
                 reason:
@@ -99,55 +231,19 @@
             return;
         }
 
-        redirectToInvidious(selectedInstance.uri, currentVideo);
-    }
-
-    function registerMenuCommands() {
-        if (typeof GM_registerMenuCommand !== "function") {
-            return;
-        }
-
-        GM_registerMenuCommand("Choose Invidious instance", async function () {
-            try {
-                const instances = await getAvailableInstances({ forceRefresh: true });
-
-                showInstancePicker({
-                    instances,
-                    reason: "Choose your preferred Invidious instance.",
-                    redirectAfterSave: Boolean(currentVideo),
-                });
-            } catch (error) {
-                console.warn("Vidious Cycle could not load the instance list:", error);
-
-                showInstancePicker({
-                    instances: [],
-                    reason:
-                        "The Invidious instance list could not be loaded. Try refreshing again later.",
-                    redirectAfterSave: Boolean(currentVideo),
-                });
-            }
-        });
-
-        GM_registerMenuCommand("Refresh Invidious instance list", async function () {
-            try {
-                await getAvailableInstances({ forceRefresh: true });
-                alert("Vidious Cycle: instance list refreshed.");
-            } catch (error) {
-                console.warn("Vidious Cycle could not refresh the instance list:", error);
-                alert("Vidious Cycle: could not refresh the instance list.");
-            }
-        });
-
-        GM_registerMenuCommand("Forget selected instance", function () {
-            removeStoredValue(CONFIG.selectedInstanceKey);
-            alert("Vidious Cycle: selected instance forgotten.");
-        });
+        redirectToInvidious(selectedInstance.uri, video);
     }
 
     function extractYouTubeVideo(rawUrl) {
-        const url = new URL(rawUrl);
-        const hostname = url.hostname.replace(/^www\./, "");
+        let url;
 
+        try {
+            url = new URL(rawUrl);
+        } catch {
+            return null;
+        }
+
+        const hostname = url.hostname.replace(/^www\./, "");
         let videoId = null;
 
         /*
@@ -222,6 +318,11 @@
             target.searchParams.set("index", video.index);
         }
 
+        info("Redirecting to Invidious.", {
+            from: location.href,
+            to: target.toString(),
+        });
+
         location.replace(target.toString());
     }
 
@@ -230,8 +331,18 @@
         const cached = getCachedInstances();
 
         if (!forceRefresh && cached) {
+            debug("Using cached instance list.", {
+                count: cached.instances.length,
+                fetchedAt: new Date(cached.fetchedAt).toISOString(),
+            });
+
             return cached.instances;
         }
+
+        debug("Fetching Invidious instance list.", {
+            url: CONFIG.instanceApiUrl,
+            forceRefresh,
+        });
 
         const rawInstances = await fetchJson(CONFIG.instanceApiUrl);
         const instances = normaliseInstances(rawInstances);
@@ -241,6 +352,10 @@
             instances,
         });
 
+        debug("Fetched and cached instance list.", {
+            count: instances.length,
+        });
+
         return instances;
     }
 
@@ -248,12 +363,14 @@
         const cached = getStoredObject(CONFIG.instanceCacheKey, null);
 
         if (!cached || !Array.isArray(cached.instances)) {
+            debug("No valid cached instance list found.");
             return null;
         }
 
         const fetchedAt = Number(cached.fetchedAt || 0);
 
         if (!fetchedAt || Date.now() - fetchedAt > CONFIG.instanceCacheTtlMs) {
+            debug("Cached instance list expired.");
             return null;
         }
 
@@ -262,10 +379,11 @@
 
     function normaliseInstances(rawInstances) {
         if (!Array.isArray(rawInstances)) {
+            warn("Instance registry did not return an array.", rawInstances);
             return [];
         }
 
-        return rawInstances
+        const instances = rawInstances
             .map(function (entry) {
                 const name = String(entry && entry[0] ? entry[0] : "");
                 const data = entry && entry[1] ? entry[1] : {};
@@ -287,19 +405,26 @@
                     totalUsers: Number(users.total || 0),
                     uptime: monitor ? Number(monitor.uptime) : null,
                     down: monitor ? Boolean(monitor.down) : true,
+                    monitorEnabled: monitor ? monitor.enabled !== false : false,
+                    monitorPublished: monitor ? monitor.published !== false : false,
                     lastStatus: monitor ? Number(monitor.last_status || 0) : null,
                 };
             })
             .filter(function (instance) {
+                const statusLooksOk =
+                    !instance.lastStatus ||
+                    (instance.lastStatus >= 200 && instance.lastStatus < 400);
+
                 return (
                     instance.type === "https" &&
                     instance.uri.startsWith("https://") &&
                     instance.down === false &&
+                    instance.monitorEnabled === true &&
+                    instance.monitorPublished === true &&
                     typeof instance.uptime === "number" &&
                     !Number.isNaN(instance.uptime) &&
                     instance.uptime >= CONFIG.minimumUptimePercent &&
-                    (!instance.lastStatus || instance.lastStatus >= 200) &&
-                    (!instance.lastStatus || instance.lastStatus < 400)
+                    statusLooksOk
                 );
             })
             .sort(function (a, b) {
@@ -309,15 +434,33 @@
 
                 return b.activeMonthUsers - a.activeMonthUsers;
             });
+
+        debug("Normalised instance list.", {
+            rawCount: rawInstances.length,
+            filteredCount: instances.length,
+        });
+
+        return instances;
     }
 
     function fetchJson(url) {
         return new Promise(function (resolve, reject) {
+            if (typeof GM_xmlhttpRequest !== "function") {
+                reject(new Error("GM_xmlhttpRequest is not available."));
+                return;
+            }
+
             GM_xmlhttpRequest({
                 method: "GET",
                 url,
                 timeout: 10000,
+
                 onload: function (response) {
+                    debug("Registry response received.", {
+                        status: response.status,
+                        finalUrl: response.finalUrl || url,
+                    });
+
                     if (response.status < 200 || response.status >= 300) {
                         reject(new Error("HTTP " + response.status));
                         return;
@@ -329,8 +472,14 @@
                         reject(error);
                     }
                 },
-                onerror: reject,
-                ontimeout: reject,
+
+                onerror: function (error) {
+                    reject(error);
+                },
+
+                ontimeout: function () {
+                    reject(new Error("Request timed out."));
+                },
             });
         });
     }
@@ -340,7 +489,13 @@
         const reason = options.reason || "Choose your preferred Invidious instance.";
         const redirectAfterSave = Boolean(options.redirectAfterSave);
 
-        runWhenDomCanHostOverlay(function () {
+        debug("Preparing instance picker.", {
+            instances: instances.length,
+            reason,
+            redirectAfterSave,
+        });
+
+        runWhenBodyExists(function () {
             const existing = document.getElementById("vidious-cycle-picker");
 
             if (existing) {
@@ -353,15 +508,32 @@
             overlay.id = "vidious-cycle-picker";
             overlay.innerHTML = buildPickerHtml(instances, selected, reason);
 
-            document.documentElement.appendChild(overlay);
+            document.body.appendChild(overlay);
 
             const select = overlay.querySelector("#vidious-cycle-instance-select");
             const saveButton = overlay.querySelector("#vidious-cycle-save-instance");
-            const refreshButton = overlay.querySelector("#vidious-cycle-refresh-instances");
+            const refreshButton = overlay.querySelector(
+                "#vidious-cycle-refresh-instances"
+            );
             const closeButton = overlay.querySelector("#vidious-cycle-close-picker");
 
+            if (!select || !saveButton || !refreshButton || !closeButton) {
+                errorLog("Picker controls could not be found after rendering.", {
+                    select,
+                    saveButton,
+                    refreshButton,
+                    closeButton,
+                });
+                return;
+            }
+
             saveButton.addEventListener("click", function () {
-                if (!select || !select.value) {
+                debug("Picker save clicked.", {
+                    selectedValue: select.value,
+                });
+
+                if (!select.value) {
+                    warn("Save clicked without a selected instance.");
                     return;
                 }
 
@@ -370,11 +542,18 @@
                 });
 
                 if (!instance) {
+                    warn("Selected instance could not be found in current list.", {
+                        selectedValue: select.value,
+                    });
                     return;
                 }
 
                 setStoredObject(CONFIG.selectedInstanceKey, instance);
+                info("Selected instance saved.", instance);
+
                 overlay.remove();
+
+                const currentVideo = extractYouTubeVideo(location.href);
 
                 if (redirectAfterSave && currentVideo) {
                     redirectToInvidious(instance.uri, currentVideo);
@@ -382,6 +561,8 @@
             });
 
             refreshButton.addEventListener("click", async function () {
+                debug("Picker refresh clicked.");
+
                 refreshButton.disabled = true;
                 refreshButton.textContent = "Refreshing...";
 
@@ -398,14 +579,20 @@
                         redirectAfterSave,
                     });
                 } catch (error) {
-                    console.warn("Vidious Cycle could not refresh the instance list:", error);
+                    errorLog("Could not refresh instance list from picker.", error);
+
                     refreshButton.disabled = false;
                     refreshButton.textContent = "Refresh list";
                 }
             });
 
             closeButton.addEventListener("click", function () {
+                debug("Picker closed.");
                 overlay.remove();
+            });
+
+            info("Instance picker shown.", {
+                instances: instances.length,
             });
         });
     }
@@ -569,16 +756,22 @@
     `;
     }
 
-    function runWhenDomCanHostOverlay(callback) {
-        if (document.documentElement) {
+    function runWhenBodyExists(callback) {
+        if (document.body) {
             callback();
             return;
         }
 
+        debug("Waiting for document.body before showing picker.");
+
         document.addEventListener(
             "DOMContentLoaded",
             function () {
-                callback();
+                if (document.body) {
+                    callback();
+                } else {
+                    errorLog("document.body still unavailable after DOMContentLoaded.");
+                }
             },
             { once: true }
         );
@@ -613,23 +806,70 @@
                 return fallback;
             }
 
-            return JSON.parse(value);
+            if (typeof value === "string") {
+                return JSON.parse(value);
+            }
+
+            return value;
         } catch (error) {
-            console.warn("Vidious Cycle could not read stored value:", key, error);
+            warn("Could not read stored value.", { key, error });
             return fallback;
         }
     }
 
     function setStoredObject(key, value) {
-        GM_setValue(key, JSON.stringify(value));
+        try {
+            GM_setValue(key, JSON.stringify(value));
+        } catch (error) {
+            errorLog("Could not store value.", { key, error });
+        }
     }
 
     function removeStoredValue(key) {
-        if (typeof GM_deleteValue === "function") {
-            GM_deleteValue(key);
+        try {
+            if (typeof GM_deleteValue === "function") {
+                GM_deleteValue(key);
+            } else {
+                GM_setValue(key, null);
+            }
+        } catch (error) {
+            errorLog("Could not remove stored value.", { key, error });
+        }
+    }
+
+    function debug(message, data) {
+        if (!CONFIG.debug) {
             return;
         }
 
-        GM_setValue(key, null);
+        if (data !== undefined) {
+            console.debug("[Vidious Cycle]", message, data);
+        } else {
+            console.debug("[Vidious Cycle]", message);
+        }
+    }
+
+    function info(message, data) {
+        if (data !== undefined) {
+            console.info("[Vidious Cycle]", message, data);
+        } else {
+            console.info("[Vidious Cycle]", message);
+        }
+    }
+
+    function warn(message, data) {
+        if (data !== undefined) {
+            console.warn("[Vidious Cycle]", message, data);
+        } else {
+            console.warn("[Vidious Cycle]", message);
+        }
+    }
+
+    function errorLog(message, data) {
+        if (data !== undefined) {
+            console.error("[Vidious Cycle]", message, data);
+        } else {
+            console.error("[Vidious Cycle]", message);
+        }
     }
 })();
