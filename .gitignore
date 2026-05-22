@@ -1,0 +1,25 @@
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# macOS folder metadata
+.Spotlight-V100
+.Trashes
+.fseventsd
+
+# Finder thumbnails and network shares
+.DocumentRevisions-V100
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Editor folders
+.vscode/
+.idea/
+
+# Local scratch files
+*.local.*
+*.tmp
+*.bak
